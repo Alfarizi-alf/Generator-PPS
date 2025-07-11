@@ -61,7 +61,6 @@
             );
         };
 
-        // Custom Dropzone Hook to replace the external library
         const useCustomDropzone = ({ onDrop, accept, disabled }) => {
             const { useState, useCallback, useRef } = React;
             const [isDragActive, setIsDragActive] = useState(false);
@@ -70,9 +69,7 @@
             const handleDragEnter = useCallback((e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                if (!disabled) {
-                    setIsDragActive(true);
-                }
+                if (!disabled) setIsDragActive(true);
             }, [disabled]);
 
             const handleDragLeave = useCallback((e) => {
@@ -92,23 +89,17 @@
                 setIsDragActive(false);
                 if (!disabled) {
                     const files = Array.from(e.dataTransfer.files);
-                    if (onDrop) {
-                        onDrop(files);
-                    }
+                    if (onDrop) onDrop(files);
                 }
             }, [disabled, onDrop]);
             
             const openFileDialog = () => {
-                if (inputRef.current) {
-                    inputRef.current.click();
-                }
+                if (inputRef.current) inputRef.current.click();
             };
 
             const handleInputChange = (e) => {
                 const files = Array.from(e.target.files);
-                if (onDrop) {
-                    onDrop(files);
-                }
+                if (onDrop) onDrop(files);
             };
 
             const getRootProps = () => ({
@@ -323,8 +314,168 @@
             
             const { getRootProps, getInputProps, isDragActive } = useCustomDropzone({ onDrop, accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'], 'text/csv': ['.csv'] }, disabled: isProcessingFile });
 
-            // ... The rest of the App component remains the same ...
-            // (updateItemState, callAiApi, handleApiError, cleanAiInput, all handleGenerate... functions, etc.)
+            const updateItemState = useCallback((itemId, field, value) => {
+                setGroupedData(prevGroupedData => {
+                    if (!prevGroupedData) return prevGroupedData;
+                    const newGroupedData = JSON.parse(JSON.stringify(prevGroupedData));
+                    for (const babKey in newGroupedData) {
+                        for (const stdKey in newGroupedData[babKey].standards) {
+                            for (const kriKey in newGroupedData[babKey].standards[stdKey].criterias) {
+                                const criteria = newGroupedData[babKey].standards[stdKey].criterias[kriKey];
+                                const itemIndex = criteria.items.findIndex(i => i.id === itemId);
+                                if (itemIndex > -1) {
+                                    criteria.items[itemIndex][field] = value;
+                                    return newGroupedData;
+                                }
+                            }
+                        }
+                    }
+                    return prevGroupedData;
+                });
+            }, []);
+
+            const callAiApi = async (prompt) => {
+                if (!apiKey) {
+                    setIsApiKeyInvalid(true);
+                    throw new Error("API_KEY_MISSING");
+                }
+                setIsApiKeyInvalid(false);
+                const payload = { contents: [{ role: "user", parts: [{ text: prompt }] }] };
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+                let response;
+                try {
+                    response = await fetch(apiUrl, { method: 'POST', mode: 'cors', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                } catch (networkError) {
+                    console.error("Kesalahan Jaringan selama fetch:", networkError);
+                    throw new Error("NETWORK_ERROR");
+                }
+                const responseText = await response.text();
+                if (!response.ok) {
+                    let errorMsg = `Kesalahan HTTP! status: ${response.status}`;
+                    if (responseText) {
+                        try {
+                            const errorBody = JSON.parse(responseText);
+                            if (response.status === 400 && errorBody?.error?.message.toLowerCase().includes("api key not valid")) {
+                                setIsApiKeyInvalid(true);
+                                throw new Error("API_KEY_INVALID");
+                            }
+                            errorMsg += ` - ${errorBody?.error?.message || 'Tidak dikenal.'}`;
+                        } catch (e) { errorMsg += ` - Respons error tidak dapat dibaca.`; }
+                    }
+                    throw new Error(errorMsg);
+                }
+                if (!responseText) throw new Error("EMPTY_RESPONSE");
+                let result;
+                try { result = JSON.parse(responseText); } catch (e) { throw new Error("INVALID_JSON"); }
+                if (!result.candidates || result.candidates.length === 0) {
+                    if (result.promptFeedback && result.promptFeedback.blockReason) throw new Error(`PROMPT_BLOCKED: ${result.promptFeedback.blockReason}`);
+                    throw new Error("NO_CANDIDATES");
+                }
+                if (result.candidates[0].finishReason === 'SAFETY') throw new Error("RESPONSE_BLOCKED_SAFETY");
+                if (result.candidates[0].content && result.candidates[0].content.parts && result.candidates[0].content.parts.length > 0) {
+                    return result.candidates[0].content.parts[0].text.trim().replace(/^"|"$/g, '');
+                }
+                return "Respons AI tidak valid atau kosong.";
+            };
+            
+            const handleApiError = (e) => {
+                let message = `Gagal menghubungi AI: ${e.message}`;
+                if (e.message === "API_KEY_MISSING") message = "Harap masukkan Kunci API Google AI Anda terlebih dahulu.";
+                else if (e.message === "API_KEY_INVALID") message = "Kunci API tidak valid. Harap periksa kembali dan coba lagi.";
+                else if (e.message === "NETWORK_ERROR") message = "Gagal terhubung ke server AI. Periksa koneksi internet Anda.";
+                else if (e.message === "EMPTY_RESPONSE" || e.message.startsWith("PROMPT_BLOCKED") || e.message === "RESPONSE_BLOCKED_SAFETY" || e.message === "NO_CANDIDATES") message = "Respons dari AI diblokir, kemungkinan karena filter keamanan. Coba ubah input Anda.";
+                
+                setModalMessage({ message, type: 'error' });
+                console.error("Kesalahan API yang ditangani:", e);
+            };
+
+            const cleanAiInput = (text) => {
+                if (typeof text !== 'string' || !text) return '';
+                const cleaned = text.trim();
+                if (cleaned.includes('Klik \'Buat Keterangan\'') || cleaned.includes('Gagal diproses')) return '';
+                return cleaned;
+            };
+
+            const handleGenerateKeterangan = async (item) => {
+                const cleanedRencanaPerbaikan = cleanAiInput(item.rencana_perbaikan);
+                const cleanedIndikator = cleanAiInput(item.indikator);
+                const cleanedSasaran = cleanAiInput(item.sasaran);
+                if (!cleanedRencanaPerbaikan && !cleanedIndikator && !cleanedSasaran) {
+                    updateItemState(item.id, 'keterangan', 'Input data tidak siap (isi RTL/Indikator/Sasaran)');
+                    return;
+                }
+                setLoadingStates(prev => ({ ...prev, [item.id + '_ket']: true }));
+                const prompt = `PERAN: Anda adalah auditor akreditasi. TUGAS: Buatkan satu judul DOKUMEN BUKTI IMPLEMENTASI yang konkret berdasarkan data berikut. DATA: - Rencana Perbaikan: "${cleanedRencanaPerbaikan}" - Indikator: "${cleanedIndikator}" - Sasaran: "${cleanedSasaran}". ATURAN: Jawaban harus berupa satu frasa/kalimat tunggal, spesifik, dan dalam format nama dokumen resmi.`;
+                try {
+                    const generatedText = await callAiApi(prompt);
+                    updateItemState(item.id, 'keterangan', generatedText);
+                } catch (e) {
+                    handleApiError(e);
+                    updateItemState(item.id, 'keterangan', `Gagal: ${e.message}`);
+                } finally {
+                    setLoadingStates(prev => ({ ...prev, [item.id + '_ket']: false }));
+                }
+            };
+            
+            const handleGenerateRTL = async (item) => {
+                const cleanedUraianEp = cleanAiInput(item.uraian_ep);
+                const cleanedRekomendasiSurvey = cleanAiInput(item.rekomendasi_survey);
+                if (!cleanedUraianEp && !cleanedRekomendasiSurvey) {
+                    updateItemState(item.id, 'rencana_perbaikan', 'Data tidak cukup untuk ide RTL');
+                    return;
+                }
+                setLoadingStates(prev => ({ ...prev, [item.id + '_rtl']: true }));
+                const prompt = `PERAN: Anda adalah konsultan mutu. TUGAS: Buatkan satu kalimat RENCANA PERBAIKAN (RTL) yang operasional dan terukur. DATA: - Uraian Elemen Penilaian: "${cleanedUraianEp}" - Rekomendasi Awal: "${cleanedRekomendasiSurvey}". ATURAN: Jawaban harus berupa kalimat tindakan yang jelas.`;
+                try {
+                    const generatedText = await callAiApi(prompt);
+                    updateItemState(item.id, 'rencana_perbaikan', generatedText);
+                } catch (e) {
+                    handleApiError(e);
+                    updateItemState(item.id, 'rencana_perbaikan', `Gagal: ${e.message}`);
+                } finally {
+                    setLoadingStates(prev => ({ ...prev, [item.id + '_rtl']: false }));
+                }
+            };
+
+            const handleGenerateIndikator = async (item) => {
+                const cleanedUraianEp = cleanAiInput(item.uraian_ep);
+                const cleanedRencanaPerbaikan = cleanAiInput(item.rencana_perbaikan);
+                if (!cleanedUraianEp && !cleanedRencanaPerbaikan) {
+                    updateItemState(item.id, 'indikator', 'Data tidak cukup untuk indikator');
+                    return;
+                }
+                setLoadingStates(prev => ({ ...prev, [item.id + '_indikator']: true }));
+                const prompt = `PERAN: Anda adalah seorang perencana mutu. TUGAS: Buatkan satu poin indikator pencapaian yang spesifik dan terukur. DATA: - Uraian Elemen Penilaian: "${cleanedUraianEp}" - Rencana Perbaikan: "${cleanedRencanaPerbaikan}". ATURAN: Jawaban harus berupa frasa indikator yang jelas.`;
+                try {
+                    const generatedText = await callAiApi(prompt);
+                    updateItemState(item.id, 'indikator', generatedText);
+                } catch (e) {
+                    handleApiError(e);
+                    updateItemState(item.id, 'indikator', `Gagal: ${e.message}`);
+                } finally {
+                    setLoadingStates(prev => ({ ...prev, [item.id + '_indikator']: false }));
+                }
+            };
+
+            const handleGenerateSasaran = async (item) => {
+                const cleanedUraianEp = cleanAiInput(item.uraian_ep);
+                const cleanedRencanaPerbaikan = cleanAiInput(item.rencana_perbaikan);
+                if (!cleanedUraianEp && !cleanedRencanaPerbaikan) {
+                    updateItemState(item.id, 'sasaran', 'Data tidak cukup untuk sasaran');
+                    return;
+                }
+                setLoadingStates(prev => ({ ...prev, [item.id + '_sasaran']: true }));
+                const prompt = `PERAN: Anda adalah seorang manajer strategi. TUGAS: Buatkan satu poin sasaran yang jelas dan berorientasi hasil. DATA: - Uraian Elemen Penilaian: "${cleanedUraianEp}" - Rencana Perbaikan: "${cleanedRencanaPerbaikan}". ATURAN: Jawaban harus berupa kalimat sasaran yang ringkas.`;
+                try {
+                    const generatedText = await callAiApi(prompt);
+                    updateItemState(item.id, 'sasaran', generatedText);
+                } catch (e) {
+                    handleApiError(e);
+                    updateItemState(item.id, 'sasaran', `Gagal: ${e.message}`);
+                } finally {
+                    setLoadingStates(prev => ({ ...prev, [item.id + '_sasaran']: false }));
+                }
+            };
 
             return (
                 <div className="bg-slate-900 min-h-screen text-white font-sans p-4 sm:p-6 lg:p-8">
@@ -392,14 +543,79 @@
                         )}
 
                         {groupedData && (
-                             <div className="animate-fade-in">
-                                {/* The rest of the UI for displaying data would go here */}
-                                <div className="text-center p-4 bg-slate-800 rounded-lg">
-                                    <h2 className="text-2xl font-bold text-white">Data Berhasil Diproses!</h2>
-                                    <p className="text-slate-400">File: {fileName}</p>
-                                    <p className="text-slate-400">Silakan gunakan fitur AI di bawah setiap item.</p>
-                                </div>
-                                {/* The detailed data display would be rendered here */}
+                            <div className="animate-fade-in">
+                                {Object.values(groupedData).map(bab => (
+                                    <div key={bab.title} className="bg-slate-800 rounded-lg shadow-md overflow-hidden mb-2">
+                                        <div onClick={() => toggleOpen(bab.title)} className="flex justify-between items-center bg-slate-700/50 px-6 py-3 cursor-pointer hover:bg-slate-700">
+                                            <h2 className="text-xl font-bold text-cyan-400">{bab.title}</h2>
+                                            <ChevronRight className={`w-6 h-6 text-cyan-400 transition-transform duration-300 ${openStates[bab.title] ? 'rotate-90' : ''}`} />
+                                        </div>
+                                        {openStates[bab.title] && (
+                                            <div className="p-4 space-y-3">
+                                                {Object.values(bab.standards).map(standard => {
+                                                    const standardId = `${bab.title}-${standard.title}`;
+                                                    return (
+                                                        <div key={standardId} className="bg-slate-900/70 rounded-md">
+                                                            <div onClick={() => toggleOpen(standardId)} className="flex justify-between items-center px-5 py-3 cursor-pointer hover:bg-slate-800/80 border-b border-slate-700">
+                                                                <h3 className="text-lg font-semibold text-teal-300">{standard.title}</h3>
+                                                                <ChevronRight className={`w-5 h-5 text-teal-300 transition-transform duration-300 ${openStates[standardId] ? 'rotate-90' : ''}`} />
+                                                            </div>
+                                                            {openStates[standardId] && (
+                                                                <div className="p-3 space-y-2">
+                                                                    {Object.values(standard.criterias).map(criteria => {
+                                                                        const criteriaId = `${standardId}-${criteria.title}`;
+                                                                        return (
+                                                                            <div key={criteriaId} className="bg-slate-800/60 rounded">
+                                                                                <div onClick={() => toggleOpen(criteriaId)} className="flex justify-between items-center px-4 py-2 cursor-pointer hover:bg-slate-700/70 border-b border-slate-700/50">
+                                                                                    <h4 className="font-semibold text-amber-300">{criteria.title}</h4>
+                                                                                    <ChevronRight className={`w-5 h-5 text-amber-300 transition-transform duration-300 ${openStates[criteriaId] ? 'rotate-90' : ''}`} />
+                                                                                </div>
+                                                                                {openStates[criteriaId] && (
+                                                                                    <div className="p-4 space-y-4">
+                                                                                        {criteria.items.map(item => (
+                                                                                            <div key={item.id} className="bg-slate-700/50 p-4 rounded-lg border border-slate-600">
+                                                                                                <p className="font-bold text-cyan-500 mb-2">{item.kode_ep}</p>
+                                                                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-y-3 gap-x-6 text-sm">
+                                                                                                    <div className="flex items-start gap-2">
+                                                                                                        <strong className="text-slate-400 whitespace-nowrap">Rencana Perbaikan:</strong> 
+                                                                                                        <div className="flex-grow"><p>{item.rencana_perbaikan}</p><button onClick={() => handleGenerateRTL(item)} disabled={loadingStates[item.id + '_rtl'] || !apiKey || isApiKeyInvalid} className="mt-1 flex items-center gap-1 text-xs text-yellow-400 hover:text-yellow-300 disabled:text-slate-500 disabled:cursor-not-allowed">{loadingStates[item.id + '_rtl'] ? <><LoaderCircle className="w-3 h-3 animate-spin"/> Memproses...</> : <><Lightbulb className="w-3 h-3"/> Buat/Perbaiki dengan AI</>}</button></div>
+                                                                                                    </div>
+                                                                                                    <div className="flex items-start gap-2">
+                                                                                                        <strong className="text-slate-400 whitespace-nowrap">Indikator:</strong> 
+                                                                                                        <div className="flex-grow"><p>{item.indikator}</p><button onClick={() => handleGenerateIndikator(item)} disabled={loadingStates[item.id + '_indikator'] || !apiKey || isApiKeyInvalid} className="mt-1 flex items-center gap-1 text-xs text-green-400 hover:text-green-300 disabled:text-slate-500 disabled:cursor-not-allowed">{loadingStates[item.id + '_indikator'] ? <><LoaderCircle className="w-3 h-3 animate-spin"/> Memproses...</> : <><Lightbulb className="w-3 h-3"/> Buat/Perbaiki dengan AI</>}</button></div>
+                                                                                                    </div>
+                                                                                                    <div className="flex items-start gap-2">
+                                                                                                        <strong className="text-slate-400 whitespace-nowrap">Sasaran:</strong> 
+                                                                                                        <div className="flex-grow"><p>{item.sasaran}</p><button onClick={() => handleGenerateSasaran(item)} disabled={loadingStates[item.id + '_sasaran'] || !apiKey || isApiKeyInvalid} className="mt-1 flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 disabled:text-slate-500 disabled:cursor-not-allowed">{loadingStates[item.id + '_sasaran'] ? <><LoaderCircle className="w-3 h-3 animate-spin"/> Memproses...</> : <><Lightbulb className="w-3 h-3"/> Buat/Perbaiki dengan AI</>}</button></div>
+                                                                                                    </div>
+                                                                                                    <div><strong className="text-slate-400">Waktu:</strong> {item.waktu}</div>
+                                                                                                    <div><strong className="text-slate-400">PJ:</strong> {item.pj}</div>
+                                                                                                </div>
+                                                                                                <div className="mt-4 pt-4 border-t border-slate-600">
+                                                                                                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                                                                                                        <div><strong className="text-slate-300 flex items-center gap-2 mb-1"><FileText size={16} /> Keterangan / Bukti Implementasi:</strong><p className="text-cyan-300 pl-2">{item.keterangan}</p></div>
+                                                                                                        <button onClick={() => handleGenerateKeterangan(item)} disabled={loadingStates[item.id + '_ket'] || !apiKey || isApiKeyInvalid} className="flex-shrink-0 flex items-center justify-center gap-2 px-4 py-2 bg-cyan-600 text-white font-semibold rounded-md hover:bg-cyan-500 disabled:bg-slate-600 disabled:cursor-not-allowed transition-colors duration-200">
+                                                                                                            {loadingStates[item.id + '_ket'] ? <LoaderCircle className="animate-spin w-5 h-5" /> : <BrainCircuit className="w-5 h-5" />}
+                                                                                                            <span>{loadingStates[item.id + '_ket'] ? 'Memproses...' : 'Buat Keterangan'}</span>
+                                                                                                        </button>
+                                                                                                    </div>
+                                                                                                </div>
+                                                                                            </div>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
                             </div>
                         )}
                     </div>
