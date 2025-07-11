@@ -527,7 +527,7 @@
                             </div>
                         </div>
 
-                        {!rawData && !groupedData && (
+                        {!groupedData && (
                             <div className="flex flex-col items-center justify-center gap-4">
                                 <div {...getRootProps()} className={`w-full p-10 border-2 border-dashed rounded-xl transition-all duration-300 ${isProcessingFile ? 'cursor-wait bg-slate-800' : 'cursor-pointer hover:border-cyan-500 hover:bg-slate-800'} ${isDragActive ? 'border-cyan-400 bg-slate-700' : 'border-slate-600'}`}>
                                     <input {...getInputProps()} />
